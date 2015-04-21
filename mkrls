@@ -1,0 +1,11 @@
+#!/bin/bash
+declare -i ln=$(wc -l < dlcdump);((ln-=2));
+declare -x h=$(tail -n"${ln}" dlcdump | php -r "echo hash('fnv132',file_get_contents('php://stdin'));");
+sed -r 's/__VERSION__/'"${h}"'/g;' < dlcdump > "rls/${h}";
+declare -x f=$(/bin/ls -t rls/ | head -n1);
+declare -x x="$(pwd -P)/rls/${f}";
+chmod +x "${x}" && "${x}";
+[[ -d "$HOME/bin" ]] && {
+  [[ -f "$HOME/bin/dlcdump" ]] && { rm "$HOME/bin/dlcdump"; };
+  ln -s "${x}" "$HOME/bin/dlcdump";
+};

@@ -1,0 +1,223 @@
+#!/usr/bin/env php
+<?php
+const VERSION_ID='__VERSION__';
+const DEBUG_OUTPUT=false;
+class AESEncryption{
+  const DEFAULT_IV='00000000000000000000000000000000';
+  const DEFAULT_MODE='ecb';
+  protected $cipher=null;
+  protected $key=null;
+  protected $iv=null;
+  protected $mode=null;
+  public function __construct($key,$mode=null,$iv=null){
+    $this->key=hex2bin($key);
+    $this->iv=hex2bin((is_null($iv)?self::DEFAULT_IV:$iv));
+    $this->mode=(is_null($mode)?self::DEFAULT_MODE:$mode);
+    if(($this->cipher=mcrypt_module_open(MCRYPT_RIJNDAEL_128,'', $this->mode,''))===FALSE){
+      throw new \Exception('eh, mcrypt_module_open() failed :-/\n');
+    }
+    mcrypt_generic_init($this->cipher,$this->key,$this->iv);
+  }
+  public function __destruct(){
+    if(!is_null($this->cipher)&&is_resource($this->cipher)){
+      mcrypt_generic_deinit($this->cipher);
+      mcrypt_module_close($this->cipher);
+    }
+  }
+  public function __invoke($data){
+    $r=mdecrypt_generic($this->cipher, $data);
+    return $r;
+  }
+};
+class dlcdump extends \stdClass{
+  const ERR_BROKEN=0x1;
+  const ERR_API_FAIL=0x2;
+  const ERR_ENCRYPTION=0x3;
+  const ERR_UNKNOWN=0x4;
+  const DLC_API_URL='http://service.jdownloader.org/dlcrypt/service.php';
+  const DLC_API_USERAGENT='Mozilla/5.0 (X11; Linux i686; rv:14.0) Gecko/20100101 Firefox/14.0.1 Iceweasel/14.0.1';
+  const DLC_MAGIC_LEN=0x58;
+  protected $dlc=null;
+  protected $rc=null;
+  protected $key=null;
+  protected $req=null;
+  protected $xml_raw=null;
+  protected $xml=null;
+  protected function hr($end=PHP_EOL){
+    printf('%s',str_pad('-',80,'-').$end);
+  }
+  public static function hdr(){
+    printf("# dlcdump - command line dlc decryption tool\n");
+    printf("# (v) %s \n",VERSION_ID);
+    printf("# (c) 2015/void@ptr.io\n");
+  }
+  protected function debug(){
+    if(!DEBUG_OUTPUT){
+      return;
+    }
+    $c=debug_backtrace()[1]['class'] . '::' . debug_backtrace()[1]['function'];
+    printf("# DBG(%s)\n",$c);
+    foreach(func_get_args()as$v){
+      $this->hr();
+      var_dump($v);
+      $this->hr(PHP_EOL.PHP_EOL);
+    }
+  }
+  protected function prepareDLC($raw){
+    $len=strlen($raw);
+    $this->dlc=[];
+    $this->dlc[0]=substr($raw,0,$len-self::DLC_MAGIC_LEN);
+    $this->dlc[1]=substr($raw,$len - self::DLC_MAGIC_LEN);
+    return ((empty($this->dlc[0])!==true) && (empty($this->dlc[1])!==true))?true:false;
+  }
+  protected function requestApi(){
+    $c=curl_init();
+    curl_setopt_array($c, [
+      CURLOPT_URL=> self::DLC_API_URL,
+      CURLOPT_RETURNTRANSFER=>1,
+      CURLOPT_USERAGENT=>self::DLC_API_USERAGENT,
+      CURLOPT_FRESH_CONNECT=>1,
+      CURLOPT_POSTFIELDS=>$this->req,
+      CURLOPT_HTTPHEADER=>[
+        'Accept: */*',
+        'Accept-Language: en-US,en',
+        'Accept-Charset: utf-8',
+        'Cache-Control: no-cache',
+        'Pragma: no-cache',
+        'Connection: close',
+        'Host: service.jdownloader.org'
+      ]
+    ]);
+    $result=curl_exec($c);
+    $status=curl_getinfo($c,CURLINFO_HTTP_CODE);
+    curl_close($c);
+    if($status!==200){
+      return false;
+    }
+    $m=null;
+    if((bool)preg_match_all('/<rc>([a-zA-Z0-9\/\+\=]{1,})<\/rc>/',$result,$m)===true){
+      $this->rc[0]=(string)$m[1][0];
+    }
+    if((bool)preg_match_all('/bla ([a-fA-f0-9]{32})/',$result,$m)===true){
+      $this->rc[1]=(string)$m[1][0];
+    }
+    $this->debug($this->rc);
+    return true;
+  }
+  protected function decryptData(){
+    $d=base64_decode($this->dlc[0]);
+    $c=new \AESEncryption(bin2hex($this->key),'cbc',bin2hex($this->key));
+    $t=$c($d);
+    $this->xml_raw=base64_decode($t);
+    return true;
+  }
+  protected function decryptKey(){
+    $i=base64_decode($this->rc[0]);
+    $c=new AESEncryption($this->rc[1]);
+    if(($r=$c($i))===false){
+      return false;
+    }
+    $this->key=base64_decode($r);
+    $this->debug($this->key);
+    return true;
+  }
+  protected function decryptDLC(){
+    if(!$this->decryptKey()){
+      return false;
+    }
+    if(!$this->decryptData()){
+      return false;
+    }
+    return true;
+  }
+  protected function showHeader(){
+    $this->hdr();
+    $this->hr();
+    printf("# generator: \n");
+    printf("  app        => %s \n", base64_decode($this->xml->header->generator->app));
+    printf("  version    => % s\n", base64_decode($this->xml->header->generator->version));
+    printf("  url        => %s \n", base64_decode($this->xml->header->generator->url));
+    printf("# tribute:\n");
+    printf("  name       => %s \n", base64_decode($this->xml->header->tribute->name));
+    printf("# dlcxmlversion: \n");
+    printf("  version    => %s \n", base64_decode($this->xml->header->dlcxmlversion));
+    $this->hr();
+  }
+  protected function showContent(){
+    printf("# package: \n");
+    printf("  name       => %s \n", base64_decode($this->xml->content->package->attributes()->name));
+    printf("  password   => %s \n", base64_decode($this->xml->content->package->attributes()->passwords));
+    printf("  comment    => %s \n", base64_decode($this->xml->content->package->attributes()->comment));
+    printf("  category   => %s \n", base64_decode($this->xml->content->package->attributes()->category));
+    $n=0;
+    foreach($this->xml->content->package->file as $v){
+      printf("  + file[%d]: \n",$n++);
+      printf("    url      => %s \n",base64_decode($v->url));
+      printf("    filename => %s \n",base64_decode($v->filename));
+      printf("    size     => %s \n",base64_decode($v->size));
+    }
+  }
+  protected function showData(){
+    if(is_null($this->xml_raw)){
+      return false;
+    }
+    try{
+      $this->xml=new SimpleXMLElement($this->xml_raw);
+    }catch(\Exception $e){
+      return false;
+    }
+    $this->debug(print_r($this->xml, true));
+    $this->showHeader();
+    $this->showContent();
+    return true;
+  }
+  public function __construct($raw){
+    if(!$this->prepareDLC($raw)){
+      throw new \Exception('broken DLC :-/',self::ERR_BROKEN);
+    }
+    $this->req=http_build_query([
+      'destType'=>'jdtc5',
+      'srcType'=>'dlc',
+      'data'=>$this->dlc[1],
+      'b'=>'last09',
+      'p'=>'2009',
+      'v'=>'9.581'
+    ]);
+  }
+  public function __invoke(){
+    if(!$this->requestApi()){
+      throw new \Exception('broken API :-/',self::ERR_API_FAIL);
+    }
+    if(!$this->decryptDLC()){
+      throw new \Exception('unable to decrypt DLC  :-/',self::ERR_ENCRYPTION);
+    }
+    if(!$this->showData()){
+      throw new \Exception('unknown FAILURE :-/',self::ERR_UNKNOWN);
+    }
+  }
+  public function __destruct(){
+    foreach($this as $k=>$v){
+      $this->{$k}=(unset)$this->{$k};
+    }
+  }
+}
+if(!isset($argv[1])||empty($argv[1])){
+  dlcdump::hdr();
+  printf("usage:\n  %s <dlc|->\n",$argv[0]);
+  exit(1);
+}
+if(($data=file_get_contents($argv[1]!=='-'?$argv[1]:'php://stdin'))===FALSE){
+  printf('unable to read data :-/\n');
+  exit(2);
+}
+try{
+  $fn=new dlcdump($data);
+  $fn();
+}catch(\Exception $e){
+  switch($e->getCode()){
+    default:
+      var_dump($e);
+      exit(5);
+    break;
+  }
+}
